@@ -1,0 +1,72 @@
+# Distributed load test, for free, from GitHub's machines.
+#
+# The trick: a "matrix" launches many runners at once. Each runner is a separate
+# machine with its OWN public IP. Your rate limiter counts per IP — so 8 runners
+# = 8 separate buckets = 8x the load that actually reaches your server. That is
+# exactly what k6 Cloud sells, done with free CI minutes instead.
+#
+# HOW TO USE:
+#   1. Put this repo on GitHub (it does not need to be public).
+#   2. Actions tab -> "distributed load test" -> "Run workflow".
+#   3. Pick how many machines and requests/second. Watch the logs.
+#
+# THE ONE RULE stays: loadtest.k6.js only touches /v1. Never point it at /v2.
+
+name: distributed load test
+
+# Manual only. This never runs on its own — you press the button.
+on:
+  workflow_dispatch:
+    inputs:
+      machines:
+        description: "How many machines (parallel runners, each its own IP)"
+        default: "8"
+      rate:
+        description: "Requests/second PER machine"
+        default: "150"
+
+jobs:
+  loadtest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Build the matrix from the "machines" input: [1, 2, ... N].
+      # Each entry becomes one runner on its own IP.
+      matrix:
+        # This gets replaced at runtime by the "prepare" step below.
+        machine: ${{ fromJSON(needs.prepare.outputs.list) }}
+    needs: prepare
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Show THIS runner's public IP, so you can see in the logs that every
+      # machine really is a different one.
+      - name: Who am I
+        run: |
+          echo "Machine #${{ matrix.machine }}"
+          echo "Public IP: $(curl -s https://api.ipify.org)"
+
+      - name: Install k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Run k6
+        run: k6 run -e RATE=${{ github.event.inputs.rate }} loadtest.k6.js
+        env:
+          # Give each runner a slightly different random seed so they are not
+          # perfectly in lockstep — closer to real, messy traffic.
+          MACHINE: ${{ matrix.machine }}
+
+  # Tiny helper job: turns the "machines" number into a JSON list [1..N] that
+  # the matrix above can consume. (GitHub matrices need a list, not a count.)
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.build.outputs.list }}
+    steps:
+      - id: build
+        run: |
+          n=${{ github.event.inputs.machines }}
+          list=$(seq 1 "$n" | jq -R . | jq -cs .)
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "Will launch $n machines: $list"
