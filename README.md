@@ -5,12 +5,20 @@ from the app repo: this is measurement tooling, not production code.
 
 ## The rule that matters
 
-**Nothing here may reach VAO.** Every provider call is drawn from a contractual
-per-service daily allowance that is global and fail-closed — spending it in a
-load test takes the app down for real users. `lib/targets.js` therefore lists
-only paths answered from the server's memory, from Postgres, or rejected before
-a provider is touched, and `assertSafe()` fails the run at startup if a
+**Nothing here may spend the VAO allowance.** Every VAO call is drawn from a
+contractual per-service daily budget that is global and fail-closed — spending it
+in a load test takes the app down for real users. `lib/targets.js` therefore
+lists only paths answered from the server's memory, from Postgres, or rejected
+before a provider is touched, and `assertSafe()` fails the run at startup if a
 forbidden path ever creeps into the catalogue.
+
+One honest exception, and it is deliberate: `/v1/vehicles` with a bounding box
+fetches live positions on demand from mgate. That is a genuine upstream call,
+though against its own separate cap rather than the VAO contract. It is included
+with a **fixed** bbox that is identical across every virtual user and every
+runner, so the server's 15-second TTL and per-viewport single-flight collapse the
+entire distributed run into roughly one upstream call per 15 seconds. Randomise
+that bbox and you defeat the coalescing — don't.
 
 That means all of `/v1`, plus the `/v2` *auxiliary* paths (`status`, `config`,
 `announcements`, `network-maps`, `meta`, `schema`). It does **not** mean the
