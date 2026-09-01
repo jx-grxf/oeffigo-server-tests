@@ -1,71 +1,32 @@
-# Distributed load test, for free, from GitHub's machines.
+# Distributed load test on GitHub's runners.
 #
-# The trick: a "matrix" launches many runners at once. Each runner is a separate
-# machine with its OWN public IP. Your rate limiter counts per IP — so 8 runners
-# = 8 separate buckets = 8x the load that actually reaches your server. That is
-# exactly what k6 Cloud sells, done with free CI minutes instead.
+# Why a matrix: every per-IP limit in the API is a separate bucket per source
+# address. One machine measures its own bucket and calls it a day. N runners are
+# N addresses, so together they load the SERVER rather than one bucket — which is
+# the thing k6 Cloud sells, done with CI minutes instead.
 #
-# HOW TO USE:
-#   1. Put this repo on GitHub (it does not need to be public).
-#   2. Actions tab -> "distributed load test" -> "Run workflow".
-#   3. Pick how many machines and requests/second. Watch the logs.
-#
-# THE ONE RULE stays: loadtest.k6.js only touches /v1. Never point it at /v2.
+# Safety rules live in lib/targets.js and are asserted at script startup: nothing
+# here may reach VAO, whose daily allowance is contractual and fail-closed.
 
 name: distributed load test
 
-# Manual only. This never runs on its own — you press the button.
 on:
   workflow_dispatch:
     inputs:
       machines:
-        description: "How many machines (parallel runners, each its own IP)"
+        description: "Parallel runners (each gets its own public IP)"
         default: "8"
       rate:
-        description: "Requests/second PER machine"
-        default: "150"
-      script:
-        description: "Which k6 script to run"
-        default: "loadtest.k6.js"
-        type: choice
-        options:
-          - loadtest.k6.js
-          - loadtest-uncached.k6.js
+        description: "Target requests/second PER machine"
+        default: "100"
+      base:
+        description: "Base URL under test"
+        default: "https://api.oeffigo.app"
+
+permissions:
+  contents: read
 
 jobs:
-  loadtest:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      # Build the matrix from the "machines" input: [1, 2, ... N].
-      # Each entry becomes one runner on its own IP.
-      matrix:
-        # This gets replaced at runtime by the "prepare" step below.
-        machine: ${{ fromJSON(needs.prepare.outputs.list) }}
-    needs: prepare
-
-    steps:
-      - uses: actions/checkout@v4
-
-      # Show THIS runner's public IP, so you can see in the logs that every
-      # machine really is a different one.
-      - name: Who am I
-        run: |
-          echo "Machine #${{ matrix.machine }}"
-          echo "Public IP: $(curl -s https://api.ipify.org)"
-
-      - name: Install k6
-        uses: grafana/setup-k6-action@v1
-
-      - name: Run k6
-        run: k6 run -e RATE=${{ github.event.inputs.rate }} "${{ github.event.inputs.script }}"
-        env:
-          # Give each runner a slightly different random seed so they are not
-          # perfectly in lockstep — closer to real, messy traffic.
-          MACHINE: ${{ matrix.machine }}
-
-  # Tiny helper job: turns the "machines" number into a JSON list [1..N] that
-  # the matrix above can consume. (GitHub matrices need a list, not a count.)
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -73,7 +34,75 @@ jobs:
     steps:
       - id: build
         run: |
-          n=${{ github.event.inputs.machines }}
-          list=$(seq 1 "$n" | jq -R . | jq -cs .)
-          echo "list=$list" >> "$GITHUB_OUTPUT"
-          echo "Will launch $n machines: $list"
+          n="${{ github.event.inputs.machines }}"
+          if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ] || [ "$n" -gt 20 ]; then
+            echo "machines must be 1..20" >&2; exit 1
+          fi
+          echo "list=$(seq 1 "$n" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  loadtest:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        machine: ${{ fromJSON(needs.prepare.outputs.list) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Identify this runner
+        run: |
+          echo "machine #${{ matrix.machine }}"
+          echo "public IP: $(curl -sS --max-time 10 https://api.ipify.org || echo unknown)"
+
+      - uses: grafana/setup-k6-action@v1
+
+      # Connection-level facts first, while the runner is otherwise idle — a
+      # cold-handshake measurement taken during a load run measures the load.
+      - name: Probe (connection, cache, protocol)
+        env:
+          BASE: ${{ github.event.inputs.base }}
+          MACHINE: ${{ matrix.machine }}
+        run: |
+          mkdir -p results
+          ./scripts/probe.sh > "results/probe-${{ matrix.machine }}.json"
+          cat "results/probe-${{ matrix.machine }}.json"
+
+      - name: Load test
+        env:
+          BASE: ${{ github.event.inputs.base }}
+          MACHINE: ${{ matrix.machine }}
+          RATE: ${{ github.event.inputs.rate }}
+        run: k6 run -e BASE="$BASE" -e RATE="$RATE" -e MACHINE="$MACHINE" scripts/loadtest.k6.js
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.machine }}
+          path: results/
+          retention-days: 7
+
+  report:
+    needs: loadtest
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+      - name: Aggregate
+        run: |
+          node scripts/aggregate.mjs artifacts | tee report.txt
+          {
+            echo '## ÖffiGo API — distributed load test'
+            echo '```'
+            cat report.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: |
+            report.txt
+            report.json
