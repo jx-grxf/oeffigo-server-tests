@@ -90,10 +90,13 @@ ${L("Cloudflare colos", report.colos.join(", ") || "n/a")}
 ${L("  total requests", report.aggregate.requests)}
 ${L("  combined req/s", report.aggregate.requestsPerSecond)}
 ${L("  edge hit rate", report.aggregate.edgeHitRate)}
-${L("  rate limited (429/403)", `${report.aggregate.rateLimited} (${report.aggregate.rateLimitedShare})`)}
+${L("  rate limited (429/403)", `${report.aggregate.rateLimited} (${report.aggregate.rateLimitedShare} of all)`)}
 ${L("  server errors (5xx)", `${report.aggregate.serverErrors} (${report.aggregate.serverErrorShare})`)}
 
-  LATENCY (TTFB, ms)
+  LATENCY (TTFB, ms) — served requests only; refusals excluded
+${L("  share of run served", report.aggregate.rateLimitedShare != null
+    ? `${Math.round((1 - report.aggregate.rateLimitedShare) * 100)}%`
+    : "unknown")}
 ${L("  edge p95 avg / worst", `${report.latencyMs.edgeP95Avg} / ${report.latencyMs.edgeP95Worst}`)}
 ${L("  origin p95 avg / worst", `${report.latencyMs.originP95Avg} / ${report.latencyMs.originP95Worst}`)}
 ${L("  herd p50 / worst max", `${report.latencyMs.herdP50Avg} / ${report.latencyMs.herdMaxWorst}`)}

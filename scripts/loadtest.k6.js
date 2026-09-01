@@ -9,7 +9,9 @@
 //              the backend N times, or once? (request coalescing / single-flight)
 //   ratelimit  Where does the per-IP bucket actually trip, and what does it cost?
 //
-// Safety: see lib/targets.js. Nothing here reaches VAO.
+// Safety: see lib/targets.js. Nothing here spends the VAO contract allowance;
+// the one upstream call it does make (/v1/vehicles) is bounded and documented
+// there.
 //
 // Run:  k6 run scripts/loadtest.k6.js
 //       k6 run -e RATE=300 -e BASE=https://api.oeffigo.app scripts/loadtest.k6.js
@@ -45,16 +47,28 @@ const byStatus    = new Counter("status_total");
 function record(res, trend) {
   const cf = (res.headers["Cf-Cache-Status"] || "").toUpperCase();
   const hit = cf === "HIT";
+  const refused = res.status === 429 || res.status === 403;
+
+  byStatus.add(1, { status: String(res.status), cf: cf || "none" });
+  if (refused) rateLimited.add(1);
+  else if (res.status >= 500) serverError.add(1);
+  // A 0 means the request never completed — the load generator or the network
+  // gave up. That is not a server verdict, so it is tracked apart from 5xx. A
+  // 429 *is* an answer, so this is counted before the refusal return below.
+  check(res, { "got an answer": (r) => r.status !== 0 });
+
+  // Latency is only recorded for requests the API actually SERVED.
+  //
+  // A refusal is fast by construction — the edge rejects it before any handler
+  // runs — so folding 429s into the same trend drags every percentile toward
+  // "how quickly we say no" and away from "how quickly we answer". Once a run
+  // pushes past the per-IP bucket the refusals dominate by count, and the
+  // reported p95 stops describing the product entirely. Ask for the refusal
+  // rate separately; do not let it contaminate the latency.
+  if (refused) return res;
   if (cf) cacheHit.add(hit);
   if (trend) trend.add(res.timings.waiting);
   else (hit ? ttfbEdge : ttfbOrigin).add(res.timings.waiting);
-
-  byStatus.add(1, { status: String(res.status), cf: cf || "none" });
-  if (res.status === 429 || res.status === 403) rateLimited.add(1);
-  else if (res.status >= 500) serverError.add(1);
-  // A 0 means the request never completed — the load generator or the network
-  // gave up. That is not a server verdict, so it is tracked apart from 5xx.
-  check(res, { "got an answer": (r) => r.status !== 0 });
   return res;
 }
 
@@ -146,6 +160,12 @@ export function handleSummary(data) {
     throughputPerSec: num("http_reqs", "rate"),
     edgeHitRate: num("edge_hit_rate", "rate"),
     rateLimited: num("rate_limited", "count") ?? 0,
+    // The share of requests the API refused. Read every latency number below as
+    // describing only the remaining share — refusals are excluded from them.
+    refusedShare: (() => {
+      const total = num("http_reqs", "count"), ref = num("rate_limited", "count") ?? 0;
+      return total ? Math.round((ref / total) * 1000) / 1000 : null;
+    })(),
     serverErrors: num("server_errors", "count") ?? 0,
     ttfb: {
       edge:   { p50: num("ttfb_edge_ms", "med"),   p95: num("ttfb_edge_ms", "p(95)"),   p99: num("ttfb_edge_ms", "p(99)") },
@@ -164,7 +184,7 @@ export function handleSummary(data) {
     `\n=== ÖffiGo API load test — machine ${MACHINE} ===`,
     line("requests", `${out.requests} (${out.throughputPerSec}/s)`),
     line("edge hit rate", out.edgeHitRate),
-    line("rate limited", out.rateLimited),
+    line("rate limited", `${out.rateLimited} (${out.refusedShare} of all)`),
     line("server errors (5xx)", out.serverErrors),
     line("edge TTFB p50/p95", `${out.ttfb.edge.p50} / ${out.ttfb.edge.p95} ms`),
     line("origin TTFB p50/p95", `${out.ttfb.origin.p50} / ${out.ttfb.origin.p95} ms`),
