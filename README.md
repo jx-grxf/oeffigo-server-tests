@@ -12,13 +12,11 @@ lists only paths answered from the server's memory, from Postgres, or rejected
 before a provider is touched, and `assertSafe()` fails the run at startup if a
 forbidden path ever creeps into the catalogue.
 
-One honest exception, and it is deliberate: `/v1/vehicles` with a bounding box
-fetches live positions on demand from mgate. That is a genuine upstream call,
-though against its own separate cap rather than the VAO contract. It is included
-with a **fixed** bbox that is identical across every virtual user and every
-runner, so the server's 15-second TTL and per-viewport single-flight collapse the
-entire distributed run into roughly one upstream call per 15 seconds. Randomise
-that bbox and you defeat the coalescing — don't.
+The default suite is provider-free. `/v1/vehicles` is included only without a
+bounding box, which reads the passive in-memory snapshot. A bbox can trigger a
+real mgate on-demand call and therefore lives in the separate, opt-in
+`scripts/provider-probe.k6.js`; it refuses to start without
+`ALLOW_PROVIDER_UPSTREAM=1` and is bounded to three fixed-viewport iterations.
 
 That means all of `/v1`, plus the `/v2` *auxiliary* paths (`status`, `config`,
 `announcements`, `network-maps`, `meta`, `schema`). It does **not** mean the
@@ -36,6 +34,7 @@ Randomising it is a denial-of-service against our own database. Don't.
 |------|--------------|
 | `scripts/loadtest.k6.js` | Five k6 scenarios: keepalive, edge, origin, herd, ratelimit |
 | `scripts/probe.sh` | Connection-level facts: cold TCP/TLS cost, colo, cache, protocol |
+| `scripts/provider-probe.k6.js` | Explicit three-call mgate probe; never part of a default/distributed run |
 | `scripts/aggregate.mjs` | Merges every runner's JSON into one report |
 | `lib/targets.js` | The endpoint catalogue and the safety assertions |
 | `.github/workflows/loadtest.yml` | The distributed run |
@@ -46,6 +45,7 @@ Randomising it is a denial-of-service against our own database. Don't.
 k6 run scripts/loadtest.k6.js                 # full run, ~3 min
 k6 run -e SMOKE=1 -e RATE=6 scripts/loadtest.k6.js   # ~40 s, validates the script
 ./scripts/probe.sh | jq                        # connection facts only
+k6 run -e ALLOW_PROVIDER_UPSTREAM=1 scripts/provider-probe.k6.js # real upstream, explicit only
 ```
 
 Distributed: Actions tab → "distributed load test" → Run workflow. Pick the

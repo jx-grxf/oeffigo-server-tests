@@ -9,9 +9,8 @@
 //              the backend N times, or once? (request coalescing / single-flight)
 //   ratelimit  Where does the per-IP bucket actually trip, and what does it cost?
 //
-// Safety: see lib/targets.js. Nothing here spends the VAO contract allowance;
-// the one upstream call it does make (/v1/vehicles) is bounded and documented
-// there.
+// Safety: see lib/targets.js. The default suite contains no provider-triggering
+// path. Real upstream probing lives in provider-probe.k6.js and is explicit.
 //
 // Run:  k6 run scripts/loadtest.k6.js
 //       k6 run -e RATE=300 -e BASE=https://api.oeffigo.app scripts/loadtest.k6.js
